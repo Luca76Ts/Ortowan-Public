@@ -1,0 +1,155 @@
+#include <Wire.h>
+#include "RTClib.h"
+
+RTC_DS1307 rtc;
+
+// === Pin ===
+const int pinUmidita1 = A0;
+const int pinUmidita2 = A1;
+const int pinPompa = 3;
+const int pinFlusso = 2;
+
+// === Parametri ===
+const int sogliaSeccoEsteso = 500;
+const float mlPerImpulso = 2.25;
+const int sogliaReset = 600;
+
+const unsigned long durataFissa = 300000;   // 5 minuti
+const unsigned long durataEstesa = 600000;  // 10 minuti max
+const unsigned long irrigazioneReset = 180000; // 3 minuti al riavvio
+const unsigned long intervalloSeriale = 30000;
+
+int statoPompa = 0;
+volatile unsigned long impulsi = 0;
+unsigned long ultimoInvio = 0;
+int oraPrecedente = -1;
+int prec1 = 0, prec2 = 0;
+DateTime ultimaIrrigazione;
+float litriUltimi = 0;
+unsigned long durataUltima = 0;
+int codiceErrore = 0;
+bool irrigazionePostReset = false;
+
+void setup() {
+  Serial.begin(9600);
+  pinMode(pinPompa, OUTPUT);
+  digitalWrite(pinPompa, LOW);
+  pinMode(pinFlusso, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(pinFlusso), contaImpulsi, FALLING);
+
+  Wire.begin();
+  rtc.begin();
+  aggiornaRTC();
+
+  // Irrigazione di sicurezza al riavvio
+  if (codiceErrore == 6) {
+    irrigazionePostReset = true;
+  }
+
+  if (irrigazionePostReset) {
+    Serial.println("💧 Irrigazione post-reset: 3 minuti");
+    digitalWrite(pinPompa, HIGH);
+    statoPompa = 1;
+    delay(irrigazioneReset);
+    digitalWrite(pinPompa, LOW);
+    statoPompa = 0;
+    irrigazionePostReset = false;
+  }
+}
+
+void loop() {
+  if (rilevaReset()) {
+    codiceErrore = 6;
+    delay(500);
+    asm volatile ("jmp 0");
+  }
+
+  DateTime now = rtc.now();
+  int ora = now.hour();
+  int min = now.minute();
+  int mese = now.month();
+
+  if (ora != oraPrecedente) {
+    oraPrecedente = ora;
+  }
+
+  if (fasciaValida(mese, ora, min)) {
+    avviaIrrigazione();
+  }
+
+  if (millis() - ultimoInvio >= intervalloSeriale) {
+    inviaSeriale();
+    ultimoInvio = millis();
+  }
+
+  delay(1000);
+}
+
+void contaImpulsi() { impulsi++; }
+
+bool fasciaValida(int m, int h, int min) {
+  switch (m) {
+    case 1: case 2: case 12: return h == 12 && min < 30;
+    case 3: case 10: return (h == 10 && min < 30) || (h == 17 && min < 30);
+    case 4: return (h == 9 && min < 30) || (h == 18 && min < 30);
+    case 5: case 6: case 7: case 8: case 9: return (h == 6 && min < 30) || (h == 20 && min < 30);
+    case 11: return h == 11 && min < 30;
+    default: return false;
+  }
+}
+
+void aggiornaRTC() {
+  DateTime now = rtc.now();
+  if (now.year() < 2020) {
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+    codiceErrore = 5;
+  }
+}
+
+void avviaIrrigazione() {
+  digitalWrite(pinPompa, HIGH);
+  statoPompa = 1;
+  unsigned long inizio = millis();
+  impulsi = 0;
+
+  // === Fase fissa: 5 minuti ===
+  while (millis() - inizio < durataFissa) {
+    delay(1000);
+  }
+
+  // === Fase estesa: fino a 10 minuti se ancora secco ===
+  while (millis() - inizio < durataEstesa && terrenoAncoraSecco()) {
+    delay(1000);
+  }
+
+  digitalWrite(pinPompa, LOW);
+  statoPompa = 0;
+  unsigned long durata = millis() - inizio;
+  litriUltimi = impulsi * mlPerImpulso / 1000.0;
+  durataUltima = durata;
+  ultimaIrrigazione = rtc.now();
+}
+
+bool terrenoAncoraSecco() {
+  return analogRead(pinUmidita1) > sogliaSeccoEsteso || analogRead(pinUmidita2) > sogliaSeccoEsteso;
+}
+
+bool rilevaReset() {
+  int a1 = analogRead(pinUmidita1);
+  int a2 = analogRead(pinUmidita2);
+  int d1 = abs(a1 - prec1);
+  int d2 = abs(a2 - prec2);
+  prec1 = a1;
+  prec2 = a2;
+  return (d1 >= sogliaReset && d2 >= sogliaReset);
+}
+
+void inviaSeriale() {
+  int u1 = constrain(map(analogRead(pinUmidita1), 400, 900, 0, 100), 0, 100);
+  int u2 = constrain(map(analogRead(pinUmidita2), 400, 900, 0, 100), 0, 100);
+  Serial.print(u1); Serial.print(",");
+  Serial.print(u2); Serial.print(",");
+  Serial.print(statoPompa); Serial.print(",");
+  Serial.print(impulsi); Serial.print(",");
+  Serial.print(codiceErrore); Serial.println();
+}
