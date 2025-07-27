@@ -1,0 +1,32 @@
+function Decoder(bytes, port) {
+  const decoded = {};
+
+  // 🔍 Mappa codici errore → descrizioni leggibili
+  const errorMap = {
+    0: "Nessun errore",
+    1: "Sensore umidità 1 guasto",
+    2: "Sensore umidità 2 guasto",
+    3: "Pompa bloccata",
+    4: "Flusso anomalo",
+    5: "Errore comunicazione",
+    126: "Errore simulato",
+    127: "Errore non definito"
+  };
+
+  // 📦 Decodifica payload
+  decoded.umidita1 = bytes[0];         // 0–100%
+  decoded.umidita2 = bytes[1];         // 0–100%
+  decoded.pompa = bytes[2] === 1 ? "ON" : "OFF";
+  decoded.impulsi = bytes[3];
+
+  // 🧪 Verifica se il pacchetto è simulato (MSB attivo)
+  decoded.simulato = (bytes[4] & 0x80) !== 0;
+
+  // 🔢 Rimuove MSB per ottenere codice reale
+  const codiceErrore = bytes[4] & 0x7F;
+
+  // 🧾 Traduzione in testo leggibile
+  decoded.errore = errorMap[codiceErrore] || `Codice ${codiceErrore}`;
+
+  return decoded;
+}
