@@ -1,0 +1,213 @@
+#include "LoRaWan_APP.h"
+
+#define RXD1 47
+#define TXD1 48
+
+// === OTAA credentials ===
+uint8_t devEui[] = { Inserire };
+uint8_t appEui[] = {Inserire };
+uint8_t appKey[] = { Inserire };
+
+// === ABP dummy keys ===
+uint8_t nwkSKey[16] = { 0 };
+uint8_t appSKey[16] = { 0 };
+uint32_t devAddr = 0x00000000;
+
+// === LoRaWAN settings ===
+LoRaMacRegion_t loraWanRegion = ACTIVE_REGION;
+DeviceClass_t loraWanClass = CLASS_A;
+bool overTheAirActivation = true;
+bool loraWanAdr = true;
+bool isTxConfirmed = true;
+uint8_t appPort = 2;
+uint8_t confirmedNbTrials = 4;
+uint32_t appTxDutyCycle = 60000;
+uint16_t userChannelsMask[6] = { 0x00FF, 0, 0, 0, 0, 0 };
+
+// === Variabili interne ===
+String buffer = "";
+bool ricezioneCompleta = false;
+bool datiFittizi = false;
+bool joined = false;
+
+int umidita1, umidita2, statoPompa, impulsi, codiceErrore;
+unsigned long ultimoRicevuto = 0;
+const unsigned long timeoutArduino = 60000;
+uint8_t statoPrecedente = 255;
+
+// === Funzioni ===
+String nomeStato(uint8_t stato) {
+  switch (stato) {
+    case 0: return "INIT";
+    case 1: return "JOIN";
+    case 2: return "SEND";
+    case 3: return "CYCLE";
+    case 4: return "SLEEP";
+    default: return "UNKNOWN";
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  Serial1.begin(9600, SERIAL_8N1, RXD1, TXD1);
+  Mcu.begin();
+  deviceState = DEVICE_STATE_INIT;
+  ultimoRicevuto = millis();
+
+  // Inizializza variabili con valori impossibili
+  umidita1 = -1;
+  umidita2 = -1;
+  statoPompa = -1;
+  impulsi = -1;
+  codiceErrore = -1;
+}
+
+void loop() {
+  if (deviceState != statoPrecedente) {
+    Serial.print("🔁 Stato dispositivo: ");
+    Serial.println(nomeStato(deviceState));
+    statoPrecedente = deviceState;
+  }
+
+  riceviDatiArduino();
+
+  if (ricezioneCompleta) {
+    datiFittizi = false;
+    deviceState = DEVICE_STATE_SEND;
+    ricezioneCompleta = false;
+    ultimoRicevuto = millis();
+  }
+
+  if (millis() - ultimoRicevuto > timeoutArduino) {
+    generaDatiFittizi();
+    datiFittizi = true;
+    deviceState = DEVICE_STATE_SEND;
+    ultimoRicevuto = millis();
+  }
+
+  switch (deviceState) {
+    case DEVICE_STATE_INIT:
+      LoRaWAN.init(loraWanClass, loraWanRegion);
+      break;
+
+    case DEVICE_STATE_JOIN:
+      LoRaWAN.join();
+      Serial.println("⏳ Join avviato, attendo conferma...");
+      break;
+
+    case DEVICE_STATE_SEND:
+    {
+      if (!joined) {
+       joined = true;
+       Serial.println("✅ Join presumibilmente completato (passaggio a SEND)");
+     }
+
+     bool datiValidi = (umidita1 > 0 || umidita2 > 0 || impulsi > 0 || codiceErrore > 0);
+      if (!datiValidi) {
+        Serial.println("⚠️ Dati non validi → forzo simulazione");
+        generaDatiFittizi();
+       datiFittizi = true;
+     }
+
+     preparaPayload(appPort);
+      Serial.println("🚀 Tentativo di invio LoRaWAN...");
+      LoRaWAN.send();
+      deviceState = DEVICE_STATE_CYCLE;
+     break;
+    }
+
+
+    case DEVICE_STATE_CYCLE:
+      txDutyCycleTime = appTxDutyCycle + randr(-APP_TX_DUTYCYCLE_RND, APP_TX_DUTYCYCLE_RND);
+      LoRaWAN.cycle(txDutyCycleTime);
+      deviceState = DEVICE_STATE_SLEEP;
+      break;
+
+    case DEVICE_STATE_SLEEP:
+      LoRaWAN.sleep(loraWanClass);
+      break;
+
+    default:
+      deviceState = DEVICE_STATE_INIT;
+      break;
+  }
+}
+
+void riceviDatiArduino() {
+  while (Serial1.available()) {
+    char c = Serial1.read();
+
+    if (c == '<') {
+      buffer = "";
+    } else if (c == '>') {
+      Serial.print("📄 Buffer ricevuto: ");
+      Serial.println(buffer);
+      Serial.print("🔢 Lunghezza buffer: ");
+      Serial.println(buffer.length());
+
+      int valori[5];
+      int index = 0, start = 0;
+
+      for (int i = 0; i < buffer.length(); i++) {
+        if (buffer.charAt(i) == ',' || i == buffer.length() - 1) {
+          String parte = buffer.substring(start, (i == buffer.length() - 1) ? i + 1 : i);
+          valori[index++] = parte.toInt();
+          start = i + 1;
+        }
+      }
+
+      if (index == 5) {
+        umidita1 = constrain(valori[0], 0, 100);
+        umidita2 = constrain(valori[1], 0, 100);
+        statoPompa = constrain(valori[2], 0, 1);
+        impulsi = constrain(valori[3], 0, 255);
+        codiceErrore = constrain(valori[4], 0, 255);
+        ricezioneCompleta = true;
+
+        Serial.println("📥 Dati reali ricevuti da Arduino:");
+        Serial.println(buffer);
+      } else {
+        Serial.print("🚫 Numero elementi nel buffer: ");
+        Serial.println(index);
+        Serial.println("⚠️ Parsing fallito: dati incompleti o errati");
+      }
+
+      buffer = "";
+    } else {
+      buffer += c;
+    }
+  }
+}
+
+void generaDatiFittizi() {
+  umidita1 = 30;
+  umidita2 = 60;
+  statoPompa = 1;
+  impulsi = 90;
+  codiceErrore = 254;
+
+  Serial.println("⚠️ Arduino non collegato – invio dati simulati fissi");
+}
+
+void preparaPayload(uint8_t port) {
+  appDataSize = 5;
+  appData[0] = umidita1;
+  appData[1] = umidita2;
+  appData[2] = statoPompa;
+  appData[3] = impulsi;
+  appData[4] = datiFittizi ? (codiceErrore | 0x80) : codiceErrore;
+
+  Serial.print("📡 TX → TTN: ");
+  Serial.print("U1:"); Serial.print(umidita1); Serial.print("% ");
+  Serial.print("U2:"); Serial.print(umidita2); Serial.print("% ");
+  Serial.print("Pompa:"); Serial.print(statoPompa);
+  Serial.print(" Flusso:"); Serial.print(impulsi);
+  Serial.print(" Errore:"); Serial.print(appData[4]);
+  Serial.print(" ("); Serial.print(datiFittizi ? "Simulati" : "Reali"); Serial.println(")");
+
+  Serial.print("📦 Hex: ");
+  for (int i = 0; i < appDataSize; i++) {
+    Serial.print("0x"); Serial.print(appData[i], HEX); Serial.print(" ");
+  }
+  Serial.println();
+}
